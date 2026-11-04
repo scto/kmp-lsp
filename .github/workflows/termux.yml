@@ -1,0 +1,161 @@
+name: Termux build
+
+# Baut kmp-lsp (inkl. CLI-Unterbefehle wie `extract-sources`) für Termux/Android (Bionic, aarch64 + x86_64),
+# dazu den JAR-Indexer als `kmp-jar-indexer.jar` (GraalVM-native-image gibt es nicht für Android; kmp-lsp startet
+# den Sidecar ersatzweise per `java -jar kmp-jar-indexer.jar` neben dem Binary — Termux-Paket openjdk-17/21).
+# Ergebnis je Architektur: tar.gz (Binary + Jar), .deb für `dpkg -i`/APT-Repo, sha256sums.txt.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      termux_prefix:
+        description: "Installationspräfix der Ziel-App (Termux: /data/data/com.termux/files/usr)"
+        default: "/data/data/com.codeforge.app/files/usr"
+        required: false
+      publish:
+        description: "Als Release-Assets an das Tag/den Branch-Namen hängen"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  NDK_API: "24"
+  TERMUX_PREFIX: ${{ github.event.inputs.termux_prefix || '/data/data/com.codeforge.app/files/usr' }}
+
+jobs:
+  sidecar-jar:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: java-sidecar
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Fat JAR bauen (ohne Tests)
+        run: ./gradlew shadowJar -x test --no-daemon
+      - name: Jar bereitstellen
+        run: |
+          mkdir -p dist
+          jar="$(ls build/libs/*.jar | head -n1)"
+          cp "$jar" dist/kmp-jar-indexer.jar
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kmp-jar-indexer-jar
+          path: java-sidecar/dist/kmp-jar-indexer.jar
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rust_target: aarch64-linux-android
+            ndk_abi: arm64-v8a
+            arch: aarch64
+            deb_arch: aarch64
+          - rust_target: x86_64-linux-android
+            ndk_abi: x86_64
+            arch: x86_64
+            deb_arch: x86_64
+    runs-on: ubuntu-latest
+    needs: sidecar-jar
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: termux-${{ matrix.rust_target }}
+
+      - name: cargo-ndk installieren
+        run: cargo install cargo-ndk --locked
+
+      - name: Android NDK bereitstellen
+        run: |
+          # Auf ubuntu-latest vorinstalliert; ANDROID_NDK_LATEST_HOME zeigt auf die neueste Version.
+          echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}" >> "$GITHUB_ENV"
+
+      - name: Release-Binary bauen (kmp-lsp + CLI)
+        run: cargo ndk -t ${{ matrix.ndk_abi }} -P ${{ env.NDK_API }} build --release --locked
+
+      - name: Version ermitteln
+        id: ver
+        run: |
+          v="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: kmp-jar-indexer-jar
+          path: jar
+
+      - name: Strippen und packen (tar.gz + deb)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.rust_target }}/release/kmp-lsp"
+          strip="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          "$strip" "$bin"
+          file "$bin" || true
+
+          name="kmp-lsp-termux-${{ matrix.arch }}"
+          mkdir -p dist "stage/$name"
+          cp "$bin" "stage/$name/kmp-lsp"
+          cp jar/kmp-jar-indexer.jar "stage/$name/kmp-jar-indexer.jar"
+          chmod +x "stage/$name/kmp-lsp"
+          tar -czf "dist/$name.tar.gz" -C stage "$name"
+
+          # .deb: Dateien liegen in $TERMUX_PREFIX/bin (der Sidecar-Jar muss neben dem Binary liegen)
+          root="deb/pkg"
+          mkdir -p "$root$TERMUX_PREFIX/bin" "$root/DEBIAN"
+          install -m755 "$bin" "$root$TERMUX_PREFIX/bin/kmp-lsp"
+          install -m644 jar/kmp-jar-indexer.jar "$root$TERMUX_PREFIX/bin/kmp-jar-indexer.jar"
+          cat > "$root/DEBIAN/control" <<CTL
+          Package: kmp-lsp
+          Version: ${VERSION}
+          Architecture: ${{ matrix.deb_arch }}
+          Maintainer: kmp-lsp build <noreply@users.noreply.github.com>
+          Recommends: openjdk-21 | openjdk-17, ripgrep
+          Description: Kotlin Multiplatform language server (Kotlin, Java, Swift)
+           Rust/tree-sitter LSP server with JAR indexer sidecar (needs a JDK).
+          CTL
+          dpkg-deb --root-owner-group -Zxz --build "$root" "dist/kmp-lsp_${VERSION}_${{ matrix.deb_arch }}.deb"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kmp-lsp-termux-${{ matrix.arch }}
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish == 'true'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kmp-lsp-termux-*
+          path: out
+          merge-multiple: true
+      - name: Prüfsummen
+        run: |
+          cd out
+          sha256sum * > sha256sums-termux.txt
+          cat sha256sums-termux.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('termux-{0}', github.run_number) }}
+          files: out/*

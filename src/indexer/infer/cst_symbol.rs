@@ -9,27 +9,24 @@
 
 use tree_sitter::Node;
 
-use crate::indexer::{
-    CallShape, CstQuery, Indexer, NodeExt, Resolution, ResolvedType, ShapeFiltered,
-};
+use crate::indexer::{CallShape, CstQuery, Indexer, Resolution, ResolvedType};
+use crate::node_ext::is_named_argument_label;
+use crate::node_ext::NodeExt;
 use crate::queries::{
     KIND_ANONYMOUS_INITIALIZER, KIND_BINDING_PATTERN_KIND, KIND_CALL_EXPR, KIND_CATCH_BLOCK,
     KIND_CLASS_BODY, KIND_CLASS_DECL, KIND_CLASS_PARAM, KIND_COMPANION_OBJ,
     KIND_CONTROL_STRUCTURE_BODY, KIND_ENUM_CLASS_BODY, KIND_ENUM_ENTRY, KIND_EQ,
     KIND_FINALLY_BLOCK, KIND_FOR_STMT, KIND_FUN_DECL, KIND_FUN_VALUE_PARAMS, KIND_IDENTIFIER,
-    KIND_IMPORT_HEADER, KIND_LAMBDA_LIT, KIND_LAMBDA_PARAMS, KIND_MULTI_VAR_DECL, KIND_NAV_EXPR,
-    KIND_NAV_SUFFIX, KIND_OBJECT_DECL, KIND_PARAMETER, KIND_PARAM_WITH_OPTIONAL_TYPE,
-    KIND_PRIMARY_CTOR, KIND_PROP_DECL, KIND_PROP_DELEGATE, KIND_SETTER, KIND_SIMPLE_IDENT,
-    KIND_STATEMENTS, KIND_TRY_EXPR, KIND_TYPE_ALIAS, KIND_TYPE_IDENT, KIND_TYPE_MODIFIERS,
-    KIND_TYPE_PARAM, KIND_TYPE_TEST, KIND_VAR_DECL, KIND_WHEN_CONDITION, KIND_WHEN_ENTRY,
-    KIND_WHEN_EXPR, KIND_WHEN_SUBJECT,
+    KIND_IMPORT_HEADER, KIND_KW_IS, KIND_LAMBDA_LIT, KIND_LAMBDA_PARAMS, KIND_MULTI_VAR_DECL,
+    KIND_NAV_EXPR, KIND_NAV_SUFFIX, KIND_OBJECT_DECL, KIND_PARAMETER,
+    KIND_PARAM_WITH_OPTIONAL_TYPE, KIND_PRIMARY_CTOR, KIND_PROP_DECL, KIND_PROP_DELEGATE,
+    KIND_SETTER, KIND_SIMPLE_IDENT, KIND_STATEMENTS, KIND_TRY_EXPR, KIND_TYPE_ALIAS,
+    KIND_TYPE_IDENT, KIND_TYPE_MODIFIERS, KIND_TYPE_PARAM, KIND_TYPE_TEST, KIND_VAR_DECL,
+    KIND_WHEN_CONDITION, KIND_WHEN_ENTRY, KIND_WHEN_EXPR, KIND_WHEN_SUBJECT,
 };
-use crate::resolver::api::Definitions;
-use crate::semantic_tokens::is_named_argument_label;
 use crate::types::CursorPos;
 use tower_lsp::lsp_types::{Location, Position, Url};
 
-use super::deps::InferDeps as _;
 use super::speculative::ResolutionDoc;
 
 pub(crate) fn is_declaration_site(node: Node<'_>) -> bool {
@@ -166,23 +163,6 @@ pub(crate) fn is_call_callee(node: Node<'_>) -> bool {
         && parent.child(0).map(|child| child.id()) == Some(node.id())
 }
 
-/// Whether `type_path` (a simple, nested `Outer.Inner`, or package-qualified
-/// type name) names a type the index knows. A qualified path is validated as a
-/// whole, not by its leaf: `Missing.User` must not pass because some unrelated
-/// `User` is indexed.
-fn names_a_known_type(indexer: &Indexer, type_path: &str, uri: &Url) -> bool {
-    if type_path.contains('.') {
-        return !crate::resolver::resolve_type_path_declarations(
-            indexer,
-            type_path,
-            uri,
-            crate::resolver::ResolveIo::IndexOnly,
-        )
-        .is_empty();
-    }
-    indexer.has_type_definition(type_path)
-}
-
 /// The classified identifier under the cursor, produced by [`classify_symbol_at`].
 #[derive(Debug, Clone)]
 pub(crate) struct SymbolAtCursor {
@@ -216,24 +196,6 @@ pub(crate) enum SymbolRole {
     ImportSegment,
 }
 
-/// `classify_symbol_at`, but taking an LSP `Position` directly — the
-/// `Position → CursorPos` conversion every navigation-feature call site
-/// otherwise repeats.
-pub(crate) fn classify_cursor(
-    indexer: &Indexer,
-    uri: &Url,
-    position: Position,
-) -> Option<SymbolAtCursor> {
-    classify_symbol_at(
-        indexer,
-        uri,
-        CursorPos {
-            line: position.line as usize,
-            utf16_col: position.character as usize,
-        },
-    )
-}
-
 /// Classify the identifier under `pos`: declaration, member reference (with
 /// receiver type resolved via the CST where possible), or import segment.
 /// Returns `None` for non-identifier positions (strings, comments,
@@ -251,10 +213,11 @@ pub(crate) fn classify_cursor(
 /// authoritative here: fall back to the unrepaired live/parsed tree so an
 /// unrelated error elsewhere in the file doesn't blind classification at the
 /// cursor.
-pub(crate) fn classify_symbol_at(
+pub(crate) fn classify_symbol_with(
     indexer: &Indexer,
     uri: &Url,
     pos: CursorPos,
+    names_a_known_type: impl Fn(&Indexer, &str, &Url) -> bool,
 ) -> Option<SymbolAtCursor> {
     let resolution = super::speculative::lambda_doc_at(indexer, uri, pos)
         .or_else(|| indexer.live_doc_or_parse(uri).map(ResolutionDoc::Parsed))?;
@@ -347,138 +310,6 @@ pub(crate) fn classify_symbol_at(
             is_call,
             shape,
         },
-    })
-}
-
-/// A definitions lookup result, tagged by how much confidence its identity
-/// carries.
-#[derive(Debug)]
-pub(crate) enum NavigationSource<T> {
-    /// Identity established from the CST + index: precise, ranked first.
-    CstResolved(T),
-    /// Name-based scan: today's behavior, visibly labeled.
-    NameScan(T),
-}
-
-/// Resolve `symbol`'s identity to its definition site(s).
-///
-/// `CstResolved` when the CST gave enough information to trust the result
-/// (a declaration is trivially its own definition; a receiver-typed member
-/// reference is looked up ON that type). `NameScan` for everything the CST
-/// couldn't narrow — an untyped receiver, or a bare reference resolved by
-/// today's name-based `find_definition_qualified(name, None, uri)` (which
-/// can span multiple same-named workspace symbols).
-pub(crate) fn resolve_identity(
-    symbol: &SymbolAtCursor,
-    indexer: &Indexer,
-    uri: &Url,
-) -> NavigationSource<Definitions> {
-    resolve_identity_with_io(symbol, indexer, uri, false)
-}
-
-/// Like `resolve_identity` but, when `index_only` is set, never spawns
-/// `rg`/`fd` — see `resolve_symbol_index_only`'s own doc comment for why.
-/// Used by the resolution-accuracy benchmark, which calls this once per
-/// identifier in a whole corpus.
-pub(crate) fn resolve_identity_with_io(
-    symbol: &SymbolAtCursor,
-    indexer: &Indexer,
-    uri: &Url,
-    index_only: bool,
-) -> NavigationSource<Definitions> {
-    let find_definition_qualified = |name: &str, qualifier: Option<&str>, uri: &Url| {
-        if index_only {
-            indexer.find_definition_qualified_index_only(name, qualifier, uri)
-        } else {
-            indexer.find_definition_qualified(name, qualifier, uri)
-        }
-    };
-    match &symbol.role {
-        SymbolRole::Declaration { indexed } => {
-            let locations = Definitions(find_definition_qualified(&symbol.name, None, uri));
-            // Only declarations `KOTLIN_DEFINITIONS` actually indexes can be
-            // trusted CST-resolved; an unindexed one (bare param, val/var-less
-            // constructor param, type param) falls through to an unanchored
-            // same-file scan or workspace-wide scan — label it NameScan (see
-            // `is_indexed_declaration_site`).
-            if *indexed {
-                NavigationSource::CstResolved(locations)
-            } else {
-                NavigationSource::NameScan(locations)
-            }
-        }
-        SymbolRole::Reference {
-            receiver_type: Some(receiver_type),
-            shape,
-            ..
-        } => {
-            let locations = if index_only {
-                indexer.find_member_of_type_index_only(&symbol.name, receiver_type, uri)
-            } else {
-                indexer.find_member_of_type(&symbol.name, receiver_type, uri)
-            };
-            // A call's own shape rules out a same-named, wrong-arity member/
-            // extension on the same receiver type — e.g. `triggers.collect {
-            // trigger -> }` (1 arg via trailing lambda) must not resolve to a
-            // same-file `Flow.collect(scope, block)` self-declaration just
-            // because both are in scope on `Flow`. Filtering to empty here
-            // (rather than keeping the wrong-arity candidate) demotes this to
-            // `NameScan`, so `find_definition`'s later, arity-blind but
-            // receiver-aware fallback (variable-type inference + hierarchy
-            // walk, which never consults the extension-in-scope registry that
-            // caused the wrong match) gets a chance to find the real target.
-            let locations = match shape {
-                Some(shape) => shape_filter_locations(indexer, *shape, locations).resolved(),
-                None => locations,
-            };
-            if locations.is_empty() {
-                NavigationSource::NameScan(Definitions(locations))
-            } else {
-                NavigationSource::CstResolved(Definitions(locations))
-            }
-        }
-        SymbolRole::Reference {
-            receiver_type: None,
-            ..
-        }
-        | SymbolRole::ImportSegment => NavigationSource::NameScan(Definitions(
-            find_definition_qualified(&symbol.name, None, uri),
-        )),
-    }
-}
-
-/// Classify `locations` by whether each one's own declared arity `shape`
-/// accepts — each `Location` is looked up by an exact `selection_range` match
-/// against the declaring file's own symbol table (how `resolve_qualified`'s
-/// candidates are always constructed), so a location that doesn't match any
-/// symbol, or whose file isn't indexed, is kept unfiltered — same fail-open
-/// reasoning `CallShape::accepts_symbol` applies to a symbol it *can* find.
-///
-/// `pub(crate)`: also used by `find_definition`'s and `compute_hover`'s
-/// `ctx.contextual`-based branches, for the identical self-shadow reason —
-/// see `CursorContext::contextual`'s own doc for why that field applies to
-/// more than `it`/`this`/named lambda params.
-pub(crate) fn shape_filter_locations(
-    indexer: &Indexer,
-    shape: CallShape,
-    locations: Vec<Location>,
-) -> ShapeFiltered<Location> {
-    ShapeFiltered::classify(locations, |location| {
-        let Some(fd) = indexer
-            .files
-            .get(location.uri.as_str())
-            .or_else(|| indexer.jar_files.get(location.uri.as_str()))
-        else {
-            return true;
-        };
-        let Some(symbol) = fd
-            .symbols
-            .iter()
-            .find(|s| s.selection_range == location.range)
-        else {
-            return true;
-        };
-        shape.accepts_symbol(symbol)
     })
 }
 
@@ -902,7 +733,7 @@ fn is_branch_narrowing<'tree>(
     let type_test = condition.first_child_of_kind(KIND_TYPE_TEST)?;
     let is_positive_test = type_test
         .child(0)
-        .is_some_and(|operator| operator.kind() == "is");
+        .is_some_and(|operator| operator.kind() == KIND_KW_IS);
     if !is_positive_test {
         return None;
     }
@@ -1245,9 +1076,8 @@ fn node_to_location(uri: &Url, node: Node<'_>, full_text: &str) -> Option<Locati
     let start_byte_column = node.start_position().column;
     let end_byte_column = node.end_position().column;
     let line_text = full_text.lines().nth(row)?;
-    let start_character =
-        crate::features::text_utils::utf16_column(&line_text[..start_byte_column]);
-    let end_character = crate::features::text_utils::utf16_column(&line_text[..end_byte_column]);
+    let start_character = crate::text_utils::utf16_column(&line_text[..start_byte_column]);
+    let end_character = crate::text_utils::utf16_column(&line_text[..end_byte_column]);
     Some(Location {
         uri: uri.clone(),
         range: tower_lsp::lsp_types::Range::new(

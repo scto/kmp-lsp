@@ -3,6 +3,7 @@
 //! See [`resolve`] for the resolution chain and strategy documentation.
 
 pub(crate) mod api;
+pub(crate) mod call_signature;
 pub(crate) mod complete;
 pub(crate) mod container;
 mod extension;
@@ -11,7 +12,19 @@ pub(crate) mod find;
 mod hierarchy;
 mod import_edit;
 mod imports;
+pub(crate) use call_signature::{
+    declaration_signature, find_fun_signature_with_receiver, members_taking_call_in_file,
+    resolve_call_signature, CallSite, Signature,
+};
+pub(crate) mod identity;
+pub(crate) use identity::{
+    classify_cursor, classify_symbol_at, resolve_identity, resolve_identity_with_io,
+    shape_filter_locations, NavigationSource,
+};
+pub(crate) mod index_read;
+pub(crate) mod indexer_queries;
 pub(crate) mod infer;
+pub(crate) mod infer_deps;
 pub(crate) mod infer_lines;
 mod package;
 mod package_scope;
@@ -43,11 +56,6 @@ pub(crate) use import_edit::{already_imported, import_insertion_line, make_impor
 pub(crate) use infer::{
     infer_receiver_type, infer_receiver_type_at, infer_variable_type_from_cst,
     infer_variable_type_raw, ReceiverKind, ReceiverType,
-};
-pub(crate) use infer_lines::{
-    extract_collection_element_type, extract_property_type_from_detail,
-    extract_return_nullability_from_detail, extract_return_type_from_detail,
-    is_collection_constructor, ReturnNullability,
 };
 pub(crate) use package_scope::find_symbol_in_package;
 pub(crate) use resolve::{

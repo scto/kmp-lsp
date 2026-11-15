@@ -6,7 +6,8 @@ use tower_lsp::lsp_types::{
 use tree_sitter::Node;
 
 use crate::indexer::CstQuery;
-use crate::indexer::{find_it_element_type, find_this_element_type, Indexer, LiveDoc, NodeExt};
+use crate::indexer::{find_it_element_type, find_this_element_type, Indexer, LiveDoc};
+use crate::node_ext::NodeExt;
 use crate::queries::{
     KIND_KW_AS, KIND_KW_BY, KIND_KW_CONSTRUCTOR, KIND_KW_GET, KIND_KW_IN, KIND_KW_IS, KIND_KW_SET,
     KIND_KW_WHERE, KIND_LAMBDA_LIT, KIND_LAMBDA_PARAMS, KIND_NAV_EXPR, KIND_SIMPLE_IDENT,
@@ -16,14 +17,14 @@ use crate::resolver::infer::find_field_type_in_class;
 use crate::Language;
 
 use super::helpers::{
-    is_annotation_reference, is_inside_lambda_parameters, is_named_argument_label,
-    is_navigation_receiver, is_top_level_call_name, is_type_reference, node_text, push_token,
-    visit_tree,
+    is_annotation_reference, is_inside_lambda_parameters, is_navigation_receiver,
+    is_top_level_call_name, is_type_reference, node_text, push_token, visit_tree,
 };
 use super::{modifier_bit, type_index, RawToken, Source};
 use crate::indexer::{
     is_call_callee, is_declaration_site, navigation_member_ident, navigation_receiver_node,
 };
+use crate::node_ext::is_named_argument_label;
 
 /// Walk non-declaration identifiers and resolve them against the index.
 pub(super) fn walk_references(

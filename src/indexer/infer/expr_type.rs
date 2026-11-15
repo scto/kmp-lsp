@@ -33,15 +33,15 @@
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Node;
 
-use crate::indexer::NodeExt;
+use crate::node_ext::NodeExt;
 use crate::queries::{
     KIND_ADDITIVE_EXPR, KIND_AS_EXPR, KIND_BOOLEAN_LITERAL, KIND_CALL_EXPR, KIND_CHARACTER_LITERAL,
     KIND_CHECK_EXPR, KIND_COMPARISON_EXPR, KIND_CONJUNCTION_EXPR, KIND_CONTROL_STRUCTURE_BODY,
     KIND_DISJUNCTION_EXPR, KIND_ELSE, KIND_ELVIS_EXPR, KIND_IF_EXPR, KIND_INTEGER_LITERAL,
-    KIND_JUMP_EXPR, KIND_LONG_LITERAL, KIND_MULTILINE_STRING_LITERAL, KIND_MULTIPLICATIVE_EXPR,
-    KIND_NAV_EXPR, KIND_NAV_SUFFIX, KIND_NULL_LITERAL, KIND_PARENTHESIZED_EXPR, KIND_PREFIX_EXPR,
-    KIND_RANGE_EXPR, KIND_REAL_LITERAL, KIND_SIMPLE_IDENT, KIND_STRING_LITERAL, KIND_THIS_EXPR,
-    KIND_TYPE_IDENT, KIND_VALUE_ARG,
+    KIND_JUMP_EXPR, KIND_KW_SAFE_CALL, KIND_LONG_LITERAL, KIND_MULTILINE_STRING_LITERAL,
+    KIND_MULTIPLICATIVE_EXPR, KIND_NAV_EXPR, KIND_NAV_SUFFIX, KIND_NULL_LITERAL,
+    KIND_PARENTHESIZED_EXPR, KIND_PREFIX_EXPR, KIND_RANGE_EXPR, KIND_REAL_LITERAL,
+    KIND_SIMPLE_IDENT, KIND_STRING_LITERAL, KIND_THIS_EXPR, KIND_TYPE_IDENT, KIND_VALUE_ARG,
 };
 use crate::StrExt as _;
 
@@ -52,7 +52,7 @@ use super::cst_symbol::{local_binding_at, local_binding_of, DestructuredValue, L
 use super::deps::{CallShape, InferDeps, ReceiverCall};
 use super::lambda::LAMBDA_RESULT_FNS;
 use super::type_subst::{build_ext_fn_type_subst, split_top_level_commas, type_args_inner};
-use crate::resolver::ReturnNullability;
+use crate::detail_text::ReturnNullability;
 
 // ─── public API ───────────────────────────────────────────────────────────────
 
@@ -363,7 +363,7 @@ fn infer_ident_type_in_form(
 ) -> Option<(String, Url)> {
     let name = node.utf8_text_owned(bytes)?;
     let start = node.start_position();
-    let col = crate::inlay_hints::ts_byte_col_to_utf16(bytes, &[], start.row, start.column);
+    let col = crate::text_utils::ts_byte_col_to_utf16(bytes, &[], start.row, start.column);
     let binding = local_binding_at(node, bytes);
     let binding_states_its_own_type = matches!(
         binding,
@@ -553,7 +553,7 @@ fn iterated_element_type(iterable_type: &str) -> Option<String> {
         let key_and_value = type_args_inner(iterable_type)?;
         return Some(format!("Map.Entry<{key_and_value}>"));
     }
-    if !crate::resolver::is_collection_constructor(&holder) {
+    if !crate::detail_text::is_collection_constructor(&holder) {
         return None;
     }
     // The loop variable keeps the argument as written, qualification and `?`
@@ -883,7 +883,7 @@ fn infer_this_expr_type(
         return None;
     }
     let start = node.start_position();
-    let col = crate::inlay_hints::ts_byte_col_to_utf16(bytes, &[], start.row, start.column);
+    let col = crate::text_utils::ts_byte_col_to_utf16(bytes, &[], start.row, start.column);
     deps.find_contextual_type("this", uri, start.row, col)
 }
 
@@ -905,7 +905,7 @@ fn infer_navigation_expr_type(
     let reads_through_safe_call = node
         .first_child_of_kind(KIND_NAV_SUFFIX)
         .and_then(|suffix| suffix.child(0))
-        .is_some_and(|operator| operator.kind() == "?.");
+        .is_some_and(|operator| operator.kind() == KIND_KW_SAFE_CALL);
     if reads_through_safe_call && !is_nullable_value(&member_type) {
         return Some((as_nullable_type(&member_type), member_uri));
     }

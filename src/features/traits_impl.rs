@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::{CompletionItem, Location, Position, Url};
 
-use crate::indexer::{find_fun_signature_with_receiver, IgnoreMatcher, Indexer};
+use crate::indexer::{IgnoreMatcher, Indexer};
+use crate::resolver::find_fun_signature_with_receiver;
 use crate::types::{FileData, SymbolEntry};
 
 use super::traits::{
@@ -131,7 +132,7 @@ impl CompletionIndex for Indexer {
         position: Position,
         snippets: bool,
     ) -> (Vec<CompletionItem>, bool) {
-        self.completions(uri, position, snippets)
+        crate::features::completion::run_completions(self, uri, position, snippets)
     }
 
     fn is_indexing_in_progress(&self) -> bool {

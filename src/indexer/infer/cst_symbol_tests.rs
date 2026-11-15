@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::indexer::Indexer;
+use crate::resolver::{classify_symbol_at, resolve_identity, NavigationSource};
 use tower_lsp::lsp_types::Url;
 
 fn uri(path: &str) -> Url {
@@ -1612,7 +1613,7 @@ fn local_binding_agrees_with_rename_scope_on_sequential_redeclaration() {
 }
 
 #[test]
-fn local_binding_agrees_with_rename_scope_on_sibling_for_when_and_catch() {
+fn local_binding_agrees_with_rename_scope_on_sibling_for_when_with_catch() {
     let for_loops = "fun use(apples: List<Apple>, bananas: List<Banana>) {\n\
                      \x20   for (item in apples) { item }\n\
                      \x20   for (item in bananas) { item }\n\

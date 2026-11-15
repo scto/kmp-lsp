@@ -1,16 +1,17 @@
 use tower_lsp::lsp_types::{Location, Position, SymbolKind, Url};
 
-use crate::indexer::{infer_local_type_at, BindingType, Indexer, InferDeps, NodeExt};
+use crate::indexer::{infer_local_type_at, BindingType, Indexer, InferDeps};
+use crate::node_ext::NodeExt;
 use crate::types::FileData;
-use crate::LinesExt;
 use crate::StrExt;
 
 use super::ensure_file_data;
-use super::infer_lines::{
-    extract_property_type_from_detail, extract_return_nullability_from_detail,
-    extract_return_type_from_detail, find_rhs_str, has_dot_after_first_call, ReturnNullability,
-};
+use super::infer_lines::{find_rhs_str, has_dot_after_first_call};
 use super::{walk_hierarchy, MAX_SYNC_JAR_PROMOTIONS_PER_HIERARCHY_WALK};
+use crate::detail_text::{
+    extract_property_type_from_detail, extract_return_nullability_from_detail,
+    extract_return_type_from_detail, ReturnNullability,
+};
 
 // ─── Type-string helpers ──────────────────────────────────────────────────────
 
@@ -581,9 +582,9 @@ fn infer_variable_type_core(
     }
     if let Some(ll) = indexer.live_lines.get(uri.as_str()) {
         let result = if keep_generics {
-            ll.infer_type_raw(var_name)
+            crate::resolver::infer_lines::infer_type_in_lines_raw(&ll, var_name)
         } else {
-            ll.infer_type(var_name)
+            crate::resolver::infer_lines::infer_type_in_lines(&ll, var_name)
         };
         if result.is_some() {
             return result;
@@ -624,9 +625,9 @@ fn infer_variable_type_core(
             });
         }
         let line_result = if keep_generics {
-            data.lines.infer_type_raw(var_name)
+            crate::resolver::infer_lines::infer_type_in_lines_raw(&data.lines, var_name)
         } else {
-            data.lines.infer_type(var_name)
+            crate::resolver::infer_lines::infer_type_in_lines(&data.lines, var_name)
         };
         if line_result.is_some() {
             return line_result;
@@ -643,9 +644,9 @@ fn infer_variable_type_core(
     let content = std::fs::read_to_string(&path).ok()?;
     let lines: Vec<String> = content.lines().map(String::from).collect();
     if keep_generics {
-        lines.infer_type_raw(var_name)
+        crate::resolver::infer_lines::infer_type_in_lines_raw(&lines, var_name)
     } else {
-        lines.infer_type(var_name)
+        crate::resolver::infer_lines::infer_type_in_lines(&lines, var_name)
     }
 }
 
@@ -895,7 +896,7 @@ pub(crate) fn infer_field_type(
     {
         return Some(strip_generics(&ann.2));
     }
-    file_data.lines.infer_type(field_name)
+    crate::resolver::infer_lines::infer_type_in_lines(&file_data.lines, field_name)
 }
 
 /// Like `infer_field_type` but preserves generic parameters in the result.
@@ -983,7 +984,7 @@ fn windowed_infer_type_raw(lines: &[String], field_name: &str, near_line: u32) -
         .into_iter()
         .map(|line| lines[line].clone())
         .collect();
-    ordered.infer_type_raw(field_name)
+    crate::resolver::infer_lines::infer_type_in_lines_raw(&ordered, field_name)
 }
 
 /// The file that declares `type_name`, resolved reachability-first from
@@ -1563,7 +1564,7 @@ fn return_type_of_named_fn_at(indexer: &Indexer, fn_name: &str, loc: &Location) 
             return Some(ret);
         }
         let start_line = symbol.selection_start() as usize;
-        let full_sig = file_data.lines.collect_signature(start_line);
+        let full_sig = crate::indexer::collect_signature(&file_data.lines, start_line);
         if let Some(ret) = extract_return_type_from_detail(&full_sig) {
             return Some(ret);
         }
@@ -1725,8 +1726,8 @@ fn find_method_return_type_declared_scoped(
     // Then member functions of the `type_base` that `class_scope` names: dozens
     // of features each declare their own same-named `TextsInteractor`.
     let classes = reachable_workspace_class_candidates(indexer, type_base, class_scope);
-    classes.iter().find_map(|loc| {
-        let file_data = indexer.files.get(loc.uri.as_str())?;
+    classes.iter().find_map(|location| {
+        let file_data = indexer.files.get(location.uri.as_str())?;
         for symbol in &file_data.symbols {
             if symbol.name != method_name {
                 continue;
@@ -1746,13 +1747,13 @@ fn find_method_return_type_declared_scoped(
                 .or_else(|| {
                     // detail may be truncated (120 char limit) — try the source lines.
                     let start_line = symbol.selection_start() as usize;
-                    let full_sig = file_data.lines.collect_signature(start_line);
+                    let full_sig = crate::indexer::collect_signature(&file_data.lines, start_line);
                     nullability = extract_return_nullability_from_detail(&full_sig);
                     extract_return_type_from_detail(&full_sig)
                 })
-                .map(|type_name| (type_name, loc.uri.clone()))
+                .map(|type_name| (type_name, location.uri.clone()))
                 // No declared type at all: the body's type, or `Unit`.
-                .or_else(|| infer_undeclared_return_type(indexer, &loc.uri, symbol));
+                .or_else(|| infer_undeclared_return_type(indexer, &location.uri, symbol));
             if let Some((type_name, written_in)) = declared_type {
                 return Some(DeclaredReturn {
                     type_name,
@@ -1825,7 +1826,8 @@ fn infer_undeclared_return_type(
     // A signature with no `=` after its parameter list has a block body or none:
     // `Unit`, without parsing the declaring file (most calls hit this).
     if let Some(file_data) = indexer.files.get(uri.as_str()) {
-        let signature = file_data.lines.collect_signature(declaration_line as usize);
+        let signature =
+            crate::indexer::collect_signature(&file_data.lines, declaration_line as usize);
         // The indexed `detail` is cut at 120 chars, so a declared type after a
         // long or multi-line parameter list can be missing from it: read the
         // full signature before concluding nothing is declared.
@@ -1844,8 +1846,7 @@ fn infer_undeclared_return_type(
         row: declaration_line as usize,
         column: function.selection_range.start.character as usize,
     };
-    let mut node =
-        crate::indexer::node_ext::descendant_for_point(doc.tree.root_node(), bytes, start_point)?;
+    let mut node = crate::node_ext::descendant_for_point(doc.tree.root_node(), bytes, start_point)?;
     while node.kind() != KIND_FUN_DECL {
         node = node.parent()?;
     }
@@ -2133,7 +2134,7 @@ fn find_extension_fn_return_type_scoped(
             continue;
         };
         let start_line = declaring_symbol.selection_start() as usize;
-        let full_sig = file_data.lines.collect_signature(start_line);
+        let full_sig = crate::indexer::collect_signature(&file_data.lines, start_line);
         if let Some(ret) = extract_return_type_from_detail(&full_sig) {
             return Some(DeclaredReturn {
                 type_name: ret,
@@ -2174,7 +2175,7 @@ fn find_extension_fn_return_type_global(
                 continue;
             }
             let start_line = symbol.selection_start() as usize;
-            let full_sig = file_data.lines.collect_signature(start_line);
+            let full_sig = crate::indexer::collect_signature(&file_data.lines, start_line);
             let declared_type = extract_return_type_from_detail(&symbol.detail)
                 .or_else(|| extract_return_type_from_detail(&full_sig));
             if let Some(type_name) = declared_type {
@@ -2249,11 +2250,11 @@ fn find_method_return_type_via_class_hierarchy(
         caller,
         8,
         MAX_SYNC_JAR_PROMOTIONS_PER_HIERARCHY_WALK,
-        |idx, super_name, super_uri, _caller| {
+        |indexer, super_name, super_uri, _caller| {
             let ancestor_scope = Url::parse(super_uri).ok();
             let class_scope = ancestor_scope.as_ref().or(from_uri);
             find_method_return_type_declared_scoped(
-                idx,
+                indexer,
                 super_name,
                 method_name,
                 class_scope,
@@ -2328,8 +2329,8 @@ fn substitute_direct_supertype_args(
 fn find_class_type_params(indexer: &Indexer, class_name: &str, from_uri: &Url) -> Vec<String> {
     reachable_workspace_class_candidates(indexer, class_name, Some(from_uri))
         .iter()
-        .find_map(|loc| {
-            let file_data = indexer.files.get(loc.uri.as_str())?;
+        .find_map(|location| {
+            let file_data = indexer.files.get(location.uri.as_str())?;
             let symbol = file_data
                 .symbols
                 .iter()

@@ -1,5 +1,6 @@
 use super::shared_fixture_tests::gradle_cache_jar_uri;
 use super::*;
+use crate::detail_text::extract_collection_element_type;
 use crate::indexer::{CallShape, Indexer};
 use crate::parser::{parse_java, parse_kotlin};
 use crate::stdlib::dot_completions_for;
@@ -426,17 +427,17 @@ fn module_scoped_narrowing_survives_into_import_package_tie_break() {
     // are real dependencies, B is NOT.
     let mut dependencies_by_content_root: std::collections::HashMap<
         std::path::PathBuf,
-        std::collections::HashSet<crate::cli::extract_sources::GradleMeta>,
+        std::collections::HashSet<crate::gradle_cache::GradleMeta>,
     > = std::collections::HashMap::new();
     dependencies_by_content_root.insert(
         std::path::PathBuf::from("/test"),
         std::collections::HashSet::from([
-            crate::cli::extract_sources::GradleMeta {
+            crate::gradle_cache::GradleMeta {
                 group: "com.example.a".to_owned(),
                 artifact: "a-lib".to_owned(),
                 version: "1.0.0".to_owned(),
             },
-            crate::cli::extract_sources::GradleMeta {
+            crate::gradle_cache::GradleMeta {
                 group: "com.example.c".to_owned(),
                 artifact: "c-lib".to_owned(),
                 version: "1.0.0".to_owned(),
@@ -516,17 +517,17 @@ fn module_scoped_narrowing_lets_import_package_tie_break_reach_a_correct_unique_
 
     let mut dependencies_by_content_root: std::collections::HashMap<
         std::path::PathBuf,
-        std::collections::HashSet<crate::cli::extract_sources::GradleMeta>,
+        std::collections::HashSet<crate::gradle_cache::GradleMeta>,
     > = std::collections::HashMap::new();
     dependencies_by_content_root.insert(
         std::path::PathBuf::from("/test"),
         std::collections::HashSet::from([
-            crate::cli::extract_sources::GradleMeta {
+            crate::gradle_cache::GradleMeta {
                 group: "com.example.a".to_owned(),
                 artifact: "a-lib".to_owned(),
                 version: "1.0.0".to_owned(),
             },
-            crate::cli::extract_sources::GradleMeta {
+            crate::gradle_cache::GradleMeta {
                 group: "com.example.c".to_owned(),
                 artifact: "c-lib".to_owned(),
                 version: "1.0.0".to_owned(),
@@ -616,17 +617,17 @@ fn module_scoped_narrowing_survives_into_default_kotlin_import_tie_break() {
     // are real dependencies, A is NOT.
     let mut dependencies_by_content_root: std::collections::HashMap<
         std::path::PathBuf,
-        std::collections::HashSet<crate::cli::extract_sources::GradleMeta>,
+        std::collections::HashSet<crate::gradle_cache::GradleMeta>,
     > = std::collections::HashMap::new();
     dependencies_by_content_root.insert(
         std::path::PathBuf::from("/test"),
         std::collections::HashSet::from([
-            crate::cli::extract_sources::GradleMeta {
+            crate::gradle_cache::GradleMeta {
                 group: "com.example.b".to_owned(),
                 artifact: "b-lib".to_owned(),
                 version: "1.0.0".to_owned(),
             },
-            crate::cli::extract_sources::GradleMeta {
+            crate::gradle_cache::GradleMeta {
                 group: "com.example.c".to_owned(),
                 artifact: "c-lib".to_owned(),
                 version: "1.0.0".to_owned(),
@@ -1837,11 +1838,11 @@ fn resolve_qualified_supertype_extension_fallback_threads_the_real_origin_uri() 
     // `com.example:seq-lib` artifact.
     let mut dependencies_by_content_root: std::collections::HashMap<
         std::path::PathBuf,
-        std::collections::HashSet<crate::cli::extract_sources::GradleMeta>,
+        std::collections::HashSet<crate::gradle_cache::GradleMeta>,
     > = std::collections::HashMap::new();
     dependencies_by_content_root.insert(
         std::path::PathBuf::from("/test/app"),
-        std::collections::HashSet::from([crate::cli::extract_sources::GradleMeta {
+        std::collections::HashSet::from([crate::gradle_cache::GradleMeta {
             group: "com.example".to_owned(),
             artifact: "seq-lib".to_owned(),
             version: "2.0.0".to_owned(),
@@ -1952,11 +1953,11 @@ fn resolve_qualified_inherited_member_lookup_threads_the_real_origin_uri() {
 
     let mut dependencies_by_content_root: std::collections::HashMap<
         std::path::PathBuf,
-        std::collections::HashSet<crate::cli::extract_sources::GradleMeta>,
+        std::collections::HashSet<crate::gradle_cache::GradleMeta>,
     > = std::collections::HashMap::new();
     dependencies_by_content_root.insert(
         std::path::PathBuf::from("/test/app"),
-        std::collections::HashSet::from([crate::cli::extract_sources::GradleMeta {
+        std::collections::HashSet::from([crate::gradle_cache::GradleMeta {
             group: "com.example".to_owned(),
             artifact: "seq-lib".to_owned(),
             version: "2.0.0".to_owned(),
@@ -2109,7 +2110,7 @@ fn resolve_qualified_inherited_member_lookup_finds_the_right_arity_overload_from
         arg_count: 1,
         trailing_lambda: false,
     };
-    let filtered = crate::indexer::shape_filter_locations(&indexer, shape, locs).resolved();
+    let filtered = crate::resolver::shape_filter_locations(&indexer, shape, locs).resolved();
     assert_eq!(
         filtered.len(),
         1,
@@ -9969,11 +9970,11 @@ fn trailing_lambda_call_resolves_the_predicate_overload_of_a_stdlib_extension() 
         line: 3,
         character: 16,
     };
-    let symbol = crate::indexer::classify_cursor(&idx, &caller_uri, position)
+    let symbol = crate::resolver::classify_cursor(&idx, &caller_uri, position)
         .expect("cursor lands on the firstOrNull identifier");
-    let identity = crate::indexer::resolve_identity_with_io(&symbol, &idx, &caller_uri, true);
+    let identity = crate::resolver::resolve_identity_with_io(&symbol, &idx, &caller_uri, true);
     match identity {
-        crate::indexer::NavigationSource::CstResolved(defs) => {
+        crate::resolver::NavigationSource::CstResolved(defs) => {
             assert_eq!(
                 defs.len(),
                 1,

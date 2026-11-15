@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 
 use super::FileContributions;
-use crate::cli::extract_sources::{default_gradle_home, parse_jar_meta, version_key};
+use crate::gradle_cache::{default_gradle_home, parse_jar_meta, version_key};
 use crate::sidecar::{SidecarHandle, SidecarSymbol};
 use crate::str_ext::StrExt;
 use crate::types::{
@@ -153,7 +153,7 @@ const KNOWN_BUILD_TOOLING_ARTIFACTS: &[(&str, &str)] = &[
 /// True when a Gradle-cache JAR belongs to a known build-tooling/compiler/
 /// IDE-platform artifact rather than an application dependency — see
 /// [`KNOWN_BUILD_TOOLING_GROUP_IDS`] and [`KNOWN_BUILD_TOOLING_ARTIFACTS`].
-fn is_known_build_tooling_jar(meta: &crate::cli::extract_sources::GradleMeta) -> bool {
+fn is_known_build_tooling_jar(meta: &crate::gradle_cache::GradleMeta) -> bool {
     KNOWN_BUILD_TOOLING_GROUP_IDS.contains(&meta.group.as_str())
         || KNOWN_BUILD_TOOLING_ARTIFACTS
             .iter()
@@ -181,11 +181,11 @@ pub(crate) fn scan_gradle_jars_split(
 
     let mut compiled_best: HashMap<
         (String, String),
-        (Vec<crate::cli::extract_sources::VersionPart>, PathBuf),
+        (Vec<crate::gradle_cache::VersionPart>, PathBuf),
     > = HashMap::new();
     let mut sources_best: HashMap<
         (String, String),
-        (Vec<crate::cli::extract_sources::VersionPart>, PathBuf),
+        (Vec<crate::gradle_cache::VersionPart>, PathBuf),
     > = HashMap::new();
 
     for jar in all {
@@ -219,9 +219,21 @@ pub(crate) fn scan_gradle_jars_split(
         }
     }
 
-    let compiled = compiled_best.into_values().map(|(_, path)| path).collect();
-    let sources = sources_best.into_values().map(|(_, path)| path).collect();
-    (compiled, sources)
+    (
+        sorted_best_paths(compiled_best),
+        sorted_best_paths(sources_best),
+    )
+}
+
+/// The winning JAR per artifact, in path order: `HashMap` iteration order is
+/// random per run and the JARs are indexed (so first-match lookups see them)
+/// in this order.
+fn sorted_best_paths(
+    best: HashMap<(String, String), (Vec<crate::gradle_cache::VersionPart>, PathBuf)>,
+) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = best.into_values().map(|(_, path)| path).collect();
+    paths.sort();
+    paths
 }
 
 /// Scan for compiled (non-sources) JARs only — backwards-compatible wrapper.
@@ -1399,9 +1411,7 @@ fn promote_candidates_bounded(
         if !cache_backed && *budget == 0 {
             continue; // degrade gracefully — later calls/requests may promote the rest
         }
-        let Some(mut sidecar_guard) =
-            crate::workspace::scan_handler::try_lock_sidecar_bounded(indexer)
-        else {
+        let Some(mut sidecar_guard) = try_lock_sidecar_bounded(indexer) else {
             continue; // degrade gracefully — a later call may succeed
         };
         if !cache_backed {
@@ -1648,4 +1658,31 @@ fn make_manifest_entry(
         file_size: meta.len(),
         names,
     })
+}
+
+/// A short, bounded attempt to lock `jar_sidecar` — used by on-demand
+/// materialization (Task 8) so a hover/completion request never blocks
+/// indefinitely behind the startup crawl or another in-flight materialization.
+/// Returns `None` (degrade to Tier-1-only for this request) rather than
+/// waiting. See design §Concurrency.
+pub(crate) fn try_lock_sidecar_bounded(
+    indexer: &crate::indexer::Indexer,
+) -> Option<std::sync::MutexGuard<'_, Option<crate::sidecar::SidecarHandle>>> {
+    // `try_lock` is genuinely non-blocking (fails immediately if contended,
+    // rather than spinning) — the "bounded" framing in the design becomes
+    // "immediate or nothing" here, which is the simplest correct instance of
+    // "don't block the interactive path" and avoids inventing a timeout
+    // mechanism this codebase doesn't otherwise use.
+    //
+    // A plain `.ok()` would treat "poisoned" the same as "contended" —
+    // unlike a contended lock, a poisoned one never recovers on its own, so
+    // that would permanently disable on-demand promotion after a single
+    // recoverable panic elsewhere while holding this lock. Every other
+    // `jar_sidecar` lock site in this codebase recovers via
+    // `unwrap_or_else(|e| e.into_inner())`; match that here.
+    match indexer.jar_sidecar.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
 }

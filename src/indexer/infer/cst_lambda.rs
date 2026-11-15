@@ -2,7 +2,8 @@
 
 use tower_lsp::lsp_types::Url;
 
-use crate::indexer::{Indexer, NodeExt};
+use crate::indexer::Indexer;
+use crate::node_ext::NodeExt;
 use crate::queries::{KIND_CALL_SUFFIX, KIND_LAMBDA_LIT, KIND_VALUE_ARG};
 use crate::types::CursorPos;
 use crate::StrExt;
@@ -381,7 +382,7 @@ pub(crate) fn cursor_node_at(
         row,
         column: byte_col,
     };
-    crate::indexer::node_ext::descendant_for_point(doc.tree.root_node(), &doc.bytes, point)
+    crate::node_ext::descendant_for_point(doc.tree.root_node(), &doc.bytes, point)
 }
 
 /// If `lambda` is part of an enclosing call (trailing or named-argument —
@@ -1189,9 +1190,9 @@ pub(crate) fn call_shape_of(
 ) -> super::deps::CallShape {
     let arg_count = call_expr
         .find_value_arguments()
-        .map(|va| crate::features::call_arg_diagnostics::count_provided_args(Some(&va), bytes))
+        .map(|va| crate::node_ext::count_provided_args(Some(&va), bytes))
         .unwrap_or(0);
-    let trailing_lambda = crate::features::call_arg_diagnostics::has_trailing_lambda(&call_expr);
+    let trailing_lambda = crate::node_ext::has_trailing_lambda(&call_expr);
     super::deps::CallShape {
         arg_count,
         trailing_lambda,

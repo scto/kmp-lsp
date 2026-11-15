@@ -6,14 +6,12 @@
 
 use tower_lsp::lsp_types::{Location, Position, Range, SymbolKind, Url};
 
-use super::text_utils::{utf16_column, word_byte_offsets};
 use crate::features::traits::{DocumentAccess, ScopeQuery, SearchAccess, SymbolIndex};
-use crate::indexer::{
-    call_shape_of, classify_cursor, cursor_node_at, is_call_callee, Indexer, NavigationSource,
-    SymbolRole,
-};
+use crate::indexer::{call_shape_of, cursor_node_at, is_call_callee, Indexer, SymbolRole};
 use crate::resolver::MAX_SYNC_JAR_PROMOTIONS_PER_HIERARCHY_WALK;
+use crate::resolver::{classify_cursor, NavigationSource};
 use crate::rg::RgSearchRequest;
+use crate::text_utils::{utf16_column, word_byte_offsets};
 use crate::types::CursorPos;
 use crate::StrExt;
 
@@ -786,7 +784,7 @@ fn add_current_file_locations(
         // file is the declaration itself; all other create() calls here are to OTHER
         // injected factory instances and must be excluded.
         if owner_class.is_some() {
-            if include_decl && crate::rg::is_declaration_of(line, name) {
+            if include_decl && crate::text_utils::is_declaration_of(line, name) {
                 for loc in line_reference_locations(uri, name, line_number, line) {
                     if !has_reference_start(locations, &loc) {
                         locations.push(loc);
@@ -804,7 +802,7 @@ fn add_current_file_locations(
             }
             // Respect include_decl: if the caller asked to exclude the declaration,
             // skip lines that declare this name (mirrors the rg path behaviour).
-            if !include_decl && crate::rg::is_declaration_of(line, name) {
+            if !include_decl && crate::text_utils::is_declaration_of(line, name) {
                 continue;
             }
             if let Some(parent) = parent_class {

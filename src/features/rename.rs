@@ -14,10 +14,9 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::features::references::verified_references_for;
-use crate::features::text_utils::is_keyword_for_file;
-use crate::indexer::{
-    classify_cursor, local_scope_occurrences, resolve_identity, Indexer, NavigationSource,
-};
+use crate::indexer::{local_scope_occurrences, Indexer};
+use crate::resolver::{classify_cursor, resolve_identity, NavigationSource};
+use crate::text_utils::is_keyword_for_file;
 
 pub(crate) async fn prepare_rename_impl(
     indexer: &Indexer,

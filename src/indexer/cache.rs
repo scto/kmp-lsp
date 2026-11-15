@@ -8,6 +8,7 @@
 //! - [`save_cache`] — build and write the cache from live index data.
 //! - [`write_status_file`] — write `~/.cache/kmp-lsp/status.json` for the skill extension.
 
+use crate::util::xdg_cache_base;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -82,15 +83,6 @@ pub(super) struct IndexCache {
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
-
-pub(crate) fn xdg_cache_base() -> PathBuf {
-    std::env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = crate::util::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-            home.join(".cache")
-        })
-}
 
 fn status_cache_path() -> PathBuf {
     xdg_cache_base().join("kmp-lsp").join("status.json")
@@ -197,13 +189,16 @@ pub(crate) fn build_qualified_keys(
         return Vec::new();
     };
     let mut out = Vec::with_capacity(file_data.symbols.len() * 2);
-    for sym in &file_data.symbols {
-        if sym.container.is_none() {
-            out.push((format!("{pkg}.{}", sym.name), sym.selection_range));
+    for symbol in &file_data.symbols {
+        if symbol.container.is_none() {
+            out.push((format!("{pkg}.{}", symbol.name), symbol.selection_range));
         }
         if let Some(stem) = file_stem {
-            if stem != sym.name {
-                out.push((format!("{pkg}.{stem}.{}", sym.name), sym.selection_range));
+            if stem != symbol.name {
+                out.push((
+                    format!("{pkg}.{stem}.{}", symbol.name),
+                    symbol.selection_range,
+                ));
             }
         }
     }
